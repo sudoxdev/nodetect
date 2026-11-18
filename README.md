@@ -356,7 +356,7 @@ For enterprise infrastructure, custom scraping clusters, or bespoke WAF bypass:
 </p>
 
 - **Lead Engineer:** Mitul Islam
-- **Telegram Handle:** [`@mitul_islam`](https://t.me/mitul_islam) (`https://t.me/mitul_islam`)
+- **Telegram Handle:** [`@mitul_islam`](https://t.me/mitul_islam)
 - **Email:** `mitulislam483@gmail.com`
 - **GitHub:** [`sudoxdev`](https://github.com/sudoxdev)
 
