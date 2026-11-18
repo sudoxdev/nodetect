@@ -1,0 +1,215 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>reCAPTCHA VM — Real Fingerprint Harvester</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; background: #0d1117; color: #c9d1d9; font: 14px/1.5 ui-monospace, "Cascadia Code", Consolas, monospace; }
+  header { padding: 18px 22px; border-bottom: 1px solid #21262d; }
+  h1 { margin: 0 0 4px; font-size: 16px; color: #e6edf3; }
+  header p { margin: 0; color: #8b949e; font-size: 12px; }
+  .bar { padding: 14px 22px; display: flex; gap: 10px; align-items: center; border-bottom: 1px solid #21262d; }
+  button { background: #238636; color: #fff; border: 0; border-radius: 6px; padding: 8px 16px; font: inherit; font-weight: 600; cursor: pointer; }
+  button.ghost { background: #21262d; color: #c9d1d9; }
+  button:disabled { opacity: .5; cursor: default; }
+  #status { color: #8b949e; font-size: 12px; }
+  #status.ok { color: #3fb950; }
+  #status.err { color: #f85149; }
+  pre { margin: 0; padding: 18px 22px; white-space: pre-wrap; word-break: break-word; font-size: 12px; }
+  .k { color: #79c0ff; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Real Fingerprint Harvester</h1>
+  <p>Open this file in your <b>real Chrome</b> (double-click it). Click Harvest, then Download. Drop the file at <span class="k">dump/real-fp.json</span> in the repo.</p>
+</header>
+<div class="bar">
+  <button id="go">Harvest</button>
+  <button id="dl" class="ghost" disabled>Download real-fp.json</button>
+  <button id="copy" class="ghost" disabled>Copy JSON</button>
+  <span id="status">idle</span>
+</div>
+<pre id="out">// captured fingerprint prints here</pre>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let RESULT = null;
+
+function setStatus(t, cls) { const s = $('status'); s.textContent = t; s.className = cls || ''; }
+
+// ---- WebGL: dump every GLenum parameter the engine can read ----
+function webglDump() {
+  const out = { webgl1: null, webgl2: null };
+  for (const [ver, key] of [['webgl', 'webgl1'], ['webgl2', 'webgl2']]) {
+    const c = document.createElement('canvas'); c.width = 256; c.height = 128;
+    const gl = c.getContext(ver) || c.getContext('experimental-' + ver);
+    if (!gl) continue;
+    const dbg = gl.getExtension('WEBGL_debug_renderer_info');
+    const params = {};
+    // enumerate every numeric constant on the context, read getParameter for each
+    const proto = Object.getPrototypeOf(gl);
+    const seen = new Set();
+    for (const obj of [gl, proto, Object.getPrototypeOf(proto) || {}]) {
+      for (const name of Object.getOwnPropertyNames(obj)) {
+        let val; try { val = gl[name]; } catch (e) { continue; }
+        if (typeof val !== 'number' || val < 0x0000 || val > 0xFFFF) continue;
+        if (seen.has(val)) continue; seen.add(val);
+        try {
+          const p = gl.getParameter(val);
+          if (p === null || p === undefined) continue;
+          if (typeof p === 'object') {
+            if (p.length !== undefined) params[val] = Array.from(p);
+            else continue;
+          } else params[val] = p;
+        } catch (e) {}
+      }
+    }
+    // explicit debug-renderer unmasked
+    let unmaskedVendor = null, unmaskedRenderer = null;
+    if (dbg) {
+      try { unmaskedVendor = gl.getParameter(dbg.UNMASKED_VENDOR_WEBGL); } catch (e) {}
+      try { unmaskedRenderer = gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL); } catch (e) {}
+    }
+    // shader precision formats
+    const prec = {};
+    const stages = { VERTEX_SHADER: gl.VERTEX_SHADER, FRAGMENT_SHADER: gl.FRAGMENT_SHADER };
+    const types = { LOW_FLOAT: gl.LOW_FLOAT, MEDIUM_FLOAT: gl.MEDIUM_FLOAT, HIGH_FLOAT: gl.HIGH_FLOAT, LOW_INT: gl.LOW_INT, MEDIUM_INT: gl.MEDIUM_INT, HIGH_INT: gl.HIGH_INT };
+    for (const sn in stages) for (const tn in types) {
+      try { const f = gl.getShaderPrecisionFormat(stages[sn], types[tn]); if (f) prec[sn + '.' + tn] = { rangeMin: f.rangeMin, rangeMax: f.rangeMax, precision: f.precision }; } catch (e) {}
+    }
+    out[key] = {
+      vendor: gl.getParameter(gl.VENDOR),
+      renderer: gl.getParameter(gl.RENDERER),
+      version: gl.getParameter(gl.VERSION),
+      shadingLanguageVersion: gl.getParameter(gl.SHADING_LANGUAGE_VERSION),
+      unmaskedVendor, unmaskedRenderer,
+      extensions: gl.getSupportedExtensions() || [],
+      params, precision: prec,
+      contextAttributes: gl.getContextAttributes(),
+    };
+  }
+  return out;
+}
+
+// ---- Canvas 2D: capture the toDataURL of a representative draw ----
+function canvas2dDump() {
+  try {
+    const c = document.createElement('canvas'); c.width = 280; c.height = 60;
+    const ctx = c.getContext('2d');
+    ctx.textBaseline = 'top'; ctx.font = "14px 'Arial'";
+    ctx.fillStyle = '#f60'; ctx.fillRect(125, 1, 62, 20);
+    ctx.fillStyle = '#069'; ctx.fillText('reCAPTCHA-VM \u{1F512} fp', 2, 15);
+    ctx.fillStyle = 'rgba(102,204,0,0.7)'; ctx.fillText('reCAPTCHA-VM \u{1F512} fp', 4, 17);
+    ctx.strokeStyle = 'rgba(120,10,200,0.5)'; ctx.beginPath();
+    ctx.arc(50, 30, 20, 0, Math.PI * 2, true); ctx.stroke();
+    return { dataURL: c.toDataURL(), width: c.width, height: c.height };
+  } catch (e) { return { error: String(e) }; }
+}
+
+// ---- Audio: OfflineAudioContext fingerprint (standard oscillator->compressor sum) ----
+function audioDump() {
+  return new Promise((resolve) => {
+    try {
+      const OAC = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+      if (!OAC) return resolve({ error: 'no OfflineAudioContext' });
+      const ctx = new OAC(1, 44100, 44100);
+      const osc = ctx.createOscillator(); osc.type = 'triangle'; osc.frequency.value = 10000;
+      const comp = ctx.createDynamicsCompressor();
+      comp.threshold.value = -50; comp.knee.value = 40; comp.ratio.value = 12;
+      comp.attack.value = 0; comp.release.value = 0.25;
+      osc.connect(comp); comp.connect(ctx.destination); osc.start(0);
+      ctx.oncomplete = (ev) => {
+        const buf = ev.renderedBuffer.getChannelData(0);
+        let sum = 0; for (let i = 4500; i < 5000; i++) sum += Math.abs(buf[i]);
+        let full = 0; for (let i = 0; i < buf.length; i++) full += Math.abs(buf[i]);
+        resolve({ sampleRate: ctx.sampleRate, hash: sum.toString(), fullHash: full.toString(), sliceLen: 500 });
+      };
+      ctx.startRendering();
+    } catch (e) { resolve({ error: String(e) }); }
+  });
+}
+
+async function harvest() {
+  setStatus('harvesting…');
+  const n = navigator, s = screen;
+  const uaData = n.userAgentData ? {
+    brands: n.userAgentData.brands,
+    mobile: n.userAgentData.mobile,
+    platform: n.userAgentData.platform,
+    highEntropy: await n.userAgentData.getHighEntropyValues(['architecture', 'bitness', 'model', 'platformVersion', 'uaFullVersion', 'fullVersionList', 'wow64']).catch(() => null),
+  } : null;
+
+  let mediaDevices = null;
+  try { mediaDevices = (await n.mediaDevices.enumerateDevices()).map(d => ({ kind: d.kind, label: d.label, hasId: !!d.deviceId })); } catch (e) {}
+
+  const fp = {
+    _harvestedAt: new Date().toISOString(),
+    _href: location.href,
+    userAgent: n.userAgent,
+    platform: n.platform,
+    vendor: n.vendor,
+    productSub: n.productSub,
+    language: n.language,
+    languages: n.languages ? Array.from(n.languages) : [n.language],
+    hardwareConcurrency: n.hardwareConcurrency,
+    deviceMemory: n.deviceMemory,
+    maxTouchPoints: n.maxTouchPoints,
+    doNotTrack: n.doNotTrack,
+    pdfViewerEnabled: n.pdfViewerEnabled,
+    cookieEnabled: n.cookieEnabled,
+    tz: Intl.DateTimeFormat().resolvedOptions().timeZone,
+    tzOffset: new Date().getTimezoneOffset(),
+    uaData,
+    connection: n.connection ? { effectiveType: n.connection.effectiveType, rtt: n.connection.rtt, downlink: n.connection.downlink, saveData: n.connection.saveData } : { effectiveType: '4g', rtt: 50, downlink: 10 },
+    screen: {
+      w: s.width, h: s.height, aw: s.availWidth, ah: s.availHeight,
+      cd: s.colorDepth, pd: s.pixelDepth, dpr: window.devicePixelRatio,
+      iw: window.innerWidth, ih: window.innerHeight, ow: window.outerWidth, oh: window.outerHeight,
+      orientation: s.orientation ? { type: s.orientation.type, angle: s.orientation.angle } : null,
+    },
+    perfMem: performance.memory ? { jsHeapSizeLimit: performance.memory.jsHeapSizeLimit, totalJSHeapSize: performance.memory.totalJSHeapSize, usedJSHeapSize: performance.memory.usedJSHeapSize } : { jsHeapSizeLimit: 2172649472, totalJSHeapSize: 35244183, usedJSHeapSize: 25000000 },
+    plugins: Array.from(n.plugins || []).map(p => ({ name: p.name, filename: p.filename, description: p.description })),
+    mimeTypes: Array.from(n.mimeTypes || []).map(m => ({ type: m.type, suffixes: m.suffixes, description: m.description })),
+    mediaDevices,
+    fonts: null,
+    timing: { now01: performance.now(), origin: performance.timeOrigin },
+    webglRaw: webglDump(),
+    canvas2d: canvas2dDump(),
+    audio: await audioDump(),
+  };
+
+  // fold webgl into the legacy shape the shim already reads, plus full param map
+  const g = fp.webglRaw.webgl2 || fp.webglRaw.webgl1 || {};
+  fp.webgl = {
+    vendor: g.vendor, renderer: g.renderer, version: g.version, shading: g.shadingLanguageVersion,
+    unmaskedVendor: g.unmaskedVendor, unmaskedRenderer: g.unmaskedRenderer,
+    exts: (g.extensions || []).length,
+    extensions: g.extensions || [],
+    params: g.params || {},
+    precision: g.precision || {},
+    contextAttributes: g.contextAttributes || null,
+  };
+
+  RESULT = fp;
+  $('out').textContent = JSON.stringify(fp, null, 2);
+  $('dl').disabled = false; $('copy').disabled = false;
+  const bad = [];
+  if (/HeadlessChrome/i.test(fp.userAgent)) bad.push('HeadlessChrome UA');
+  if (!fp.webgl.unmaskedRenderer || /SwiftShader|llvmpipe/i.test(fp.webgl.unmaskedRenderer || '')) bad.push('software renderer: ' + fp.webgl.unmaskedRenderer);
+  if (fp.audio.error) bad.push('audio: ' + fp.audio.error);
+  setStatus(bad.length ? 'harvested (warn: ' + bad.join('; ') + ')' : 'harvested OK — real GPU: ' + fp.webgl.unmaskedRenderer, bad.length ? 'err' : 'ok');
+}
+
+$('go').onclick = () => harvest().catch(e => setStatus('error: ' + e, 'err'));
+$('dl').onclick = () => {
+  const blob = new Blob([JSON.stringify(RESULT, null, 2)], { type: 'application/json' });
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'real-fp.json';
+  document.body.appendChild(a); a.click(); a.remove();
+};
+$('copy').onclick = () => navigator.clipboard.writeText(JSON.stringify(RESULT, null, 2)).then(() => setStatus('copied to clipboard', 'ok'));
+</script>
+</body>
+</html>
